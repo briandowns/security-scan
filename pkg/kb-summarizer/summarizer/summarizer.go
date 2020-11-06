@@ -6,14 +6,14 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
-
-	"gopkg.in/yaml.v2"
 
 	kb "github.com/aquasecurity/kube-bench/check"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v2"
 )
 
 const (
@@ -76,16 +76,23 @@ const (
 )
 
 type CheckWrapper struct {
-	ID          string                       `yaml:"id" json:"id"`
-	Text        string                       `json:"d"`
-	Type        string                       `json:"-"`
-	Remediation string                       `json:"r"`
-	State       State                        `json:"s"`
-	Scored      bool                         `json:"-"`
-	Result      map[kb.State]map[string]bool `json:"-"`
-	NodeType    []NodeType                   `json:"t"`
-	NodesMap    map[string]bool              `json:"-"`
-	Nodes       []string                     `json:"n,omitempty"`
+	ID             string                       `yaml:"id" json:"id"`
+	Text           string                       `json:"d"`
+	Type           string                       `json:"-"`
+	Remediation    string                       `json:"r"`
+	State          State                        `json:"s"`
+	Scored         bool                         `json:"-"`
+	Result         map[kb.State]map[string]bool `json:"-"`
+	NodeType       []NodeType                   `json:"t"`
+	NodesMap       map[string]bool              `json:"-"`
+	Nodes          []string                     `json:"n,omitempty"`
+	Audit          string                       `json:"a"`
+	AuditConfig    string                       `json:"ac"`
+	TestInfo       []string                     `json:"ti"`
+	Commands       []*exec.Cmd                  `json:"c"`
+	ConfigCommands []*exec.Cmd                  `json:"cc"`
+	ActualValue    string                       `json:"av"`
+	ExpectedResult string                       `json:"er"`
 }
 
 type GroupWrapper struct {
@@ -192,7 +199,7 @@ func GetUserSkipInfo(benchmark, skipConfigFile string) (map[string]bool, error) 
 	}
 	skipArr, ok := sc.Skip[benchmark]
 	if !ok {
-		skipArr, ok = sc.Skip[CurrentBenchmarkKey]
+		skipArr = sc.Skip[CurrentBenchmarkKey]
 	}
 	if len(skipArr) == 0 {
 		return skipMap, nil
@@ -217,8 +224,7 @@ func GetChecksMapFromConfigFile(configFile string) (map[string]string, error) {
 	if len(data) == 0 {
 		return checksMap, nil
 	}
-	err = json.Unmarshal(data, &checksMap)
-	if err != nil {
+	if err := json.Unmarshal(data, &checksMap); err != nil {
 		return nil, fmt.Errorf("error unmarshalling config file %v: %v", configFile, err)
 	}
 	return checksMap, nil
@@ -241,11 +247,11 @@ func (s *Summarizer) processOneResultFileForHost(results *kb.Controls, hostname 
 			if !check.Scored {
 				continue
 			}
-			logrus.Infof("host:%v id: %v %v", hostname, check.ID, check.State)
+			logrus.Infof("host:%s id: %s %v", hostname, check.ID, check.State)
 			printCheck(check)
 			cw := s.checkWrappersMaps[check.ID]
 			if cw == nil {
-				logrus.Errorf("check %v found in results but not in spec", check.ID)
+				logrus.Errorf("check %s found in results but not in spec", check.ID)
 				continue
 			}
 
@@ -266,7 +272,6 @@ func (s *Summarizer) processOneResultFileForHost(results *kb.Controls, hostname 
 				cw.Result[check.State] = make(map[string]bool)
 			}
 			cw.Result[check.State][hostname] = true
-
 		}
 	}
 }
@@ -282,10 +287,11 @@ func (s *Summarizer) addNode(nodeType NodeType, hostname string) {
 }
 
 func (s *Summarizer) summarizeForHost(hostname string) error {
-	logrus.Debugf("summarizeForHost: %v", hostname)
+	logrus.Debugf("summarizeForHost: %s", hostname)
 
-	hostDir := fmt.Sprintf("%v/%v", s.InputDirectory, hostname)
-	resultFilesPaths, err := filepath.Glob(fmt.Sprintf("%v/*.json", hostDir))
+	hostDir := fmt.Sprintf("%s/%s", s.InputDirectory, hostname)
+
+	resultFilesPaths, err := filepath.Glob(fmt.Sprintf("%s/*.json", hostDir))
 	if err != nil {
 		return fmt.Errorf("error globing files: %v", err)
 	}
@@ -296,21 +302,20 @@ func (s *Summarizer) summarizeForHost(hostname string) error {
 		resultFile := filepath.Base(resultFilePath)
 		nodeType, ok := nodeTypeMapping[resultFile]
 		if !ok {
-			logrus.Errorf("unknown result file found: %v", resultFilePath)
+			logrus.Errorf("unknown result file found: %s", resultFilePath)
 			continue
 		}
 		s.addNode(nodeType, hostname)
-		logrus.Debugf("host: %v resultFile: %v", hostname, resultFile)
+		logrus.Debugf("host: %s resultFile: %s", hostname, resultFile)
 		// Load one result file
 		// Marshal it into the results
 		contents, err := ioutil.ReadFile(filepath.Clean(resultFilePath))
 		if err != nil {
-			return fmt.Errorf("error reading file %+v: %v", resultFilePath, err)
+			return fmt.Errorf("error reading file %+s: %v", resultFilePath, err)
 		}
 
 		results := &kb.Controls{}
-		err = json.Unmarshal(contents, results)
-		if err != nil {
+		if err := json.Unmarshal(contents, results); err != nil {
 			return fmt.Errorf("error unmarshalling: %v", err)
 		}
 		logrus.Debugf("results: %+v", results)
@@ -343,7 +348,7 @@ func (s *Summarizer) save() error {
 }
 
 func (s *Summarizer) loadVersionMapping() error {
-	configFileName := fmt.Sprintf("%v/%v", s.ControlsDirectory, ConfigFilename)
+	configFileName := fmt.Sprintf("%s/%s", s.ControlsDirectory, ConfigFilename)
 	v := viper.New()
 	v.SetConfigFile(configFileName)
 	if err := v.ReadInConfig(); err != nil {
@@ -356,7 +361,7 @@ func (s *Summarizer) loadVersionMapping() error {
 	}
 	logrus.Debugf("%v: %v", VersionMappingKey, kubeToBenchmarkMap)
 	s.kubeToBenchmarkMap = kubeToBenchmarkMap
-
+	logrus.Infof("CONFIG: %+v\n", kubeToBenchmarkMap)
 	return nil
 }
 
@@ -366,21 +371,20 @@ func (s *Summarizer) loadControlsFromFile(filePath string) (*kb.Controls, error)
 	if err != nil {
 		return nil, fmt.Errorf("error reading file %+v: %v", filePath, err)
 	}
-	err = yaml.Unmarshal(fileContents, controls)
-	if err != nil {
+	if err := yaml.Unmarshal(fileContents, controls); err != nil {
 		return nil, fmt.Errorf("error unmarshalling master controls file: %v", err)
 	}
 	logrus.Debugf("filePath: %v, controls: %+v", filePath, controls)
 	return controls, nil
 }
 
-func getNodeTypes() []NodeType {
-	return []NodeType{
-		NodeTypeMaster,
-		NodeTypeEtcd,
-		NodeTypeNode,
-	}
-}
+// func getNodeTypes() []NodeType {
+// 	return []NodeType{
+// 		NodeTypeMaster,
+// 		NodeTypeEtcd,
+// 		NodeTypeNode,
+// 	}
+// }
 
 func getResultsFileNodeTypeMapping() map[string]NodeType {
 	return map[string]NodeType{
@@ -393,7 +397,7 @@ func getResultsFileNodeTypeMapping() map[string]NodeType {
 }
 
 func (s *Summarizer) getControlsFilePath(filename string) string {
-	return fmt.Sprintf("%v/%v/%v", s.ControlsDirectory, s.BenchmarkVersion, filename)
+	return fmt.Sprintf("%s/%s/%s", s.ControlsDirectory, s.BenchmarkVersion, filename)
 }
 
 func (s *Summarizer) getNodeTypeControlsFileMapping() map[string]NodeType {
@@ -403,7 +407,7 @@ func (s *Summarizer) getNodeTypeControlsFileMapping() map[string]NodeType {
 		s.getControlsFilePath(EtcdControlsFilename):   NodeTypeEtcd,
 		s.getControlsFilePath(NodeControlsFilename):   NodeTypeNode,
 	}
-	allFiles, err := filepath.Glob(fmt.Sprintf("%v/%v/*.yaml", s.ControlsDirectory, s.BenchmarkVersion))
+	allFiles, err := filepath.Glob(fmt.Sprintf("%s/%s/*.yaml", s.ControlsDirectory, s.BenchmarkVersion))
 	if err != nil {
 		logrus.Errorf("error globing files: %v", err)
 		return filepaths
@@ -429,7 +433,7 @@ func (s *Summarizer) loadControls() error {
 		s.nodeSeen[nodeType] = map[string]bool{}
 		controls, err := s.loadControlsFromFile(controlsFile)
 		if err != nil {
-			logrus.Errorf("error loading controls from file %v: %v", controlsFile, err)
+			logrus.Errorf("error loading controls from file %s: %v", controlsFile, err)
 			continue
 		}
 		for _, g := range controls.Groups {
@@ -503,12 +507,19 @@ func getMappedState(state kb.State) State {
 
 func getCheckWrapper(check *kb.Check) *CheckWrapper {
 	return &CheckWrapper{
-		ID:          check.ID,
-		Text:        check.Text,
-		Type:        check.Type,
-		Remediation: check.Remediation,
-		Scored:      check.Scored,
-		Result:      map[kb.State]map[string]bool{},
+		ID:             check.ID,
+		Text:           check.Text,
+		Type:           check.Type,
+		Remediation:    check.Remediation,
+		Scored:         check.Scored,
+		Result:         map[kb.State]map[string]bool{},
+		Audit:          check.Audit,
+		AuditConfig:    check.AuditConfig,
+		TestInfo:       check.TestInfo,
+		Commands:       check.Commands,
+		ConfigCommands: check.ConfigCommands,
+		ActualValue:    check.ActualValue,
+		ExpectedResult: check.ExpectedResult,
 	}
 }
 
@@ -536,9 +547,7 @@ func (s *Summarizer) getMissingNodesMapOfCheckWrapper(check *CheckWrapper, nodes
 		}
 	}
 	for n := range nodes {
-		if _, ok := allNodes[n]; ok {
-			delete(allNodes, n)
-		}
+		delete(allNodes, n)
 	}
 	logrus.Debugf("ID: %v, missing nodes: %v", check.ID, allNodes)
 	var missingNodes []string
@@ -557,7 +566,7 @@ func (s *Summarizer) getMissingNodesMapOfCheckWrapper(check *CheckWrapper, nodes
 func (s *Summarizer) runFinalPassOnCheckWrapper(cw *CheckWrapper) {
 	nodesMap := s.getNodesMapOfCheckWrapper(cw)
 	nodeCount := len(nodesMap)
-	logrus.Debugf("id: %v nodeCount: %v", cw.ID, nodeCount)
+	logrus.Debugf("id: %s nodeCount: %d", cw.ID, nodeCount)
 	if len(cw.Result) == 1 {
 		if _, ok := cw.Result[NA]; ok {
 			cw.State = NotApplicable
@@ -641,7 +650,6 @@ func (s *Summarizer) runFinalPass() error {
 
 func (s *Summarizer) Summarize() error {
 	logrus.Infof("summarize")
-	logrus.Debugf("inputDir: %v", s.InputDirectory)
 
 	// Walk through the host folders
 	hostsDir, err := ioutil.ReadDir(s.InputDirectory)
@@ -654,12 +662,11 @@ func (s *Summarizer) Summarize() error {
 			continue
 		}
 		hostname := hostDir.Name()
-		logrus.Debugf("hostDir: %v", hostname)
+		logrus.Debugf("hostDir: %s", hostname)
 
 		// Check for errors before proceeding
-		errorLogFile := fmt.Sprintf("%v/%v/%v", s.InputDirectory, hostname, DefaultErrorLogFileName)
-		_, err := os.Stat(errorLogFile)
-		if err == nil {
+		errorLogFile := fmt.Sprintf("%s/%s/%s", s.InputDirectory, hostname, DefaultErrorLogFileName)
+		if _, err := os.Stat(errorLogFile); err == nil {
 			data, err := ioutil.ReadFile(errorLogFile)
 			if err != nil {
 				return fmt.Errorf("error reading file %v: %v", errorLogFile, err)
@@ -684,7 +691,7 @@ func (s *Summarizer) Summarize() error {
 	if err := s.runFinalPass(); err != nil {
 		return fmt.Errorf("error running final pass on the report: %v", err)
 	}
-	logrus.Debugf("--- before final pass")
+	logrus.Debugf("--- after final pass")
 	_ = s.printReport()
 	return s.save()
 }
@@ -698,29 +705,31 @@ func (s *Summarizer) printReport() error {
 		}
 	}
 
-	bytes, err := json.MarshalIndent(s.fullReport, "", " ")
+	b, err := json.MarshalIndent(s.fullReport, "", " ")
 	if err != nil {
-		return fmt.Errorf("error marshalling report: %v", err)
+		return fmt.Errorf("error marshalling report: %s", err.Error())
 	}
 
-	txt := string(bytes)
-	logrus.Debugf("json txt: %+v", txt)
+	logrus.Debugf("json txt: %s", b)
 	return nil
 }
 
 func printCheck(check *kb.Check) {
 	logrus.Debugf("check: ")
-	logrus.Debugf("ID: %v", check.ID)
+	logrus.Debugf("ID: %s", check.ID)
 	logrus.Debugf("State: %v", check.State)
-	logrus.Debugf("Text: %v", check.Text)
-	logrus.Debugf("Audit: %v", check.Audit)
-	logrus.Debugf("ActualValue: %v", check.ActualValue)
+	logrus.Debugf("Text: %s", check.Text)
+	logrus.Debugf("Audit: %s", check.Audit)
+	logrus.Debugf("ActualValue: %s", check.ActualValue)
+	logrus.Debugf("KB check: %+v", check)
 }
+
 func printCheckWrapper(cw *CheckWrapper) {
 	logrus.Debugf("checkWrapper:")
-	logrus.Debugf("id: %v", cw.ID)
+	logrus.Debugf("id: %s", cw.ID)
 	logrus.Debugf("state: %v", cw.State)
 	logrus.Debugf("node_type: %+v", cw.NodeType)
 	logrus.Debugf("nodes: %+v", cw.Nodes)
 	logrus.Debugf("result: %+v", cw.Result)
+	logrus.Debugf("checkWrapper: %+v", cw)
 }
